@@ -1,0 +1,516 @@
+---
+title: "To what extent do terrorist attacks affect public sentiment surrounding immigration and refugee policy? A case study of the Stockholm terrorist attack, April 2017."
+author: "Alexandra Salo, Computational Social Science, Universidad Carlos III de Madrid"
+format: html
+editor: visual
+---
+
+## Loading the libraries
+
+```{r results = 'hide', message = FALSE, warning=FALSE}
+library(readr)
+library(tidyr)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(DataExplorer)
+library(cobalt)
+library(sandwich)
+library(lmtest)
+library(tableone)
+library(Matching )
+library(stats)
+library(broom)
+library(ggplot2)
+library(flextable)
+library(officer)
+library(MatchIt)
+library(car)
+
+```
+## Loading the data
+```{r results = 'hide', message = FALSE, warning=FALSE}
+big_data <- read_csv("R_TFM/ESS8e02_3.csv")
+timing_data_unformatted <- read_csv("R_TFM/ESS8TIMEe01.csv")
+```
+
+## Cleaning the data
+```{r results = 'hide', message = FALSE, warning=FALSE}
+# Select only the necessary variables from the second dataset
+timing_data <- timing_data_unformatted |> 
+  dplyr::select(idno, inwdds, inwmms, inwyys, inwshh, inwsmm) |> 
+  filter(inwyys != 9999)
+
+# Combine the date and time variables into a single datetime variable
+timing_data <- timing_data |> 
+  mutate(interview_datetime = make_datetime(inwyys, inwmms, inwdds))
+
+# Remove the original date and time variables
+timing_data <- timing_data |> 
+  dplyr::select(idno, interview_datetime)
+
+# Merge the datasets by 'idno'
+merged_data <- merge(big_data, timing_data, by = "idno")
+
+# Display the first few rows of the merged data
+head(merged_data)
+summary(merged_data)
+
+# List of covariates to keep from the merged dataset
+covariates <- c("idno", "cntry", "interview_datetime", "nwspol", "netusoft", "trstplc", "prtvtbse", "imdfetn", "impcntr", "imbgeco", "imwbcnt", "rlgblg", "rlgdgr", "gvrfgap", "rfgfrpc", "rfgbfml", "gndr", "agea", "eisced", "uempla", "hinctnta", "region")
+
+# Select only the necessary variables
+cleaned_data <- merged_data %>% dplyr::select(covariates)
+
+# Factorize the variables that need factorizing
+cleaned_data$cntry <- factor(cleaned_data$cntry)
+cleaned_data$gndr <- factor(cleaned_data$gndr)
+cleaned_data$region <- factor(cleaned_data$region)
+cleaned_data$prtvtbse <- factor(cleaned_data$prtvtbse)
+
+# Handle special codes and replace with NA 
+special_codes <- list(
+  nwspol = c(7777, 8888, 9999),
+  netusoft = c(7, 8, 9), 
+  trstplc = c(77, 88, 99),
+  prtvtbse = c(66, 77, 88, 99),
+  imdfetn = c(7, 8, 9), 
+  impcntr = c(7, 8, 9), 
+  imbgeco = c(77, 88, 99),
+  imwbcnt = c(77, 88, 99),
+  rlgblg = c(66, 77, 99),
+  rlgdgr = c(77, 88, 99),
+  gvrfgap = c(7, 8, 9), 
+  rfgfrpc = c(7, 8, 9), 
+  rfgbfml = c(7, 8, 9), 
+  gndr = 9,
+  agea = 999,
+  eisced = c(77, 88, 99),
+  hinctnta = c(77, 88, 99)
+)
+
+# Replace special codes with NA
+df_allNA <- cleaned_data %>%
+  mutate(across(
+    names(special_codes),
+    ~ case_when(
+      . %in% special_codes[[cur_column()]] ~ NA_real_,
+      TRUE ~ as.numeric(.)
+    )
+  ))
+
+summary(df_allNA)
+
+swedish_data <- df_allNA |> 
+  filter(cntry == "SE")
+
+# Define the date of the terrorist attack
+swedish_attack_date <- as.Date("2017-04-7") 
+
+# Create a centered time variable and treatment variable
+swedish_data <- swedish_data |> 
+  mutate(time_centered = as.numeric(difftime(interview_datetime, swedish_attack_date, units = "days"))) |> 
+  mutate(treatment = ifelse(time_centered >= 0, TRUE, FALSE)) |> 
+  drop_na()
+
+summary(swedish_data)
+```
+
+## Descriptive analysis and balance tests
+
+```{r}
+# Summary statistics of key variables
+summary(swedish_data)
+
+DataExplorer::create_report(swedish_data)
+
+# Balance checks of the data pre and post attack
+pre_attack <- swedish_data |>  filter(time_centered < 0)
+post_attack <- swedish_data |>  filter(time_centered >= 0)
+
+# Summary statistics for covariates before and after the event
+summary(pre_attack)
+summary(post_attack)
+
+# Using tableone to create a summary table
+table_one <- CreateTableOne(vars = covariates, strata = "treatment", data = swedish_data, test = FALSE)
+table_one_print <- print(table_one, smd = TRUE)
+kable_table <- kable(table_one_print) #to copy to word
+#Balance shows very negligent differences between pre- and post- attack data between all covariates. The only noticable difference we see is with age and region, with slight imbalances. With the average age being about 2 years older in the post-attack treatment group.
+```
+## Another balance test
+This chunks output is in the thesis Annex
+```{r}
+# Rename target variables
+swedish_data <- swedish_data %>%
+  mutate(
+    perception_immigrants = imdfetn,
+    perception_refugees = gvrfgap
+  )
+
+# Visualize balance with cobalt package
+bal.tab <- bal.tab(treatment ~ perception_immigrants + perception_refugees + nwspol + netusoft + trstplc + prtvtbse + imbgeco + imwbcnt + rlgblg + gvrfgap + rfgfrpc + rfgbfml + gndr + agea + eisced + uempla + hinctnta + region, data = swedish_data)
+#Confirms previous results of a well balanced control and treatment group where there is only a slight difference in age and region.
+
+#Extract for Word document
+# Extract the balance table as a data frame with the variable names intact
+bal.tab_df <- as.data.frame(bal.tab$Balance)
+bal.tab_df$Variable <- rownames(bal.tab$Balance)  # Add the variable names as a new column
+rownames(bal.tab_df) <- NULL  # Remove row names to clean up the data frame
+bal.tab_flex <- flextable(bal.tab_df)
+# Add a title to the flextable
+bal.tab_flex <- add_header_lines(bal.tab_flex, values = "Balance Measures for Treatment Effect")
+
+# Create a new Word document
+doc <- read_docx()
+
+# Add the flextable to the document
+doc <- body_add_flextable(doc, value = bal.tab_flex)
+
+# Save the document, add to my Word document
+print(doc, target = "bal_tab_output.docx")
+
+```
+
+## Constructing the models
+```{r}
+# Estimation of treatment effects using regression models
+model1 <- lm(perception_immigrants ~ treatment + agea + region + time_centered, data = swedish_data)
+model2 <- lm(perception_refugees ~ treatment + agea + region + time_centered, data = swedish_data)
+
+swedish_data <- swedish_data %>%
+  mutate(
+    combination_value = (perception_immigrants+perception_refugees)
+  )
+
+model3 <- lm(combination_value ~ treatment + agea + region + time_centered, data = swedish_data)
+
+# Summary of the models
+summary(model1)
+# The treatment effect is slightly negative but not statistically significant, indicating that the treatment does not have a significant impact on the perception of immigrants.
+summary(model2)
+#The treatment effect is not statistically significant, indicating no significant impact on the perception of refugees.
+summary(model3)
+#The treatment effect is not statistically significant, indicating no significant impact on the combined perception of immigrants and refugees.
+
+#Visualizations of the models
+# Tidy up the model summaries to extract coefficients and confidence intervals
+model1_tidy <- tidy(model1, conf.int = TRUE)
+model2_tidy <- tidy(model2, conf.int = TRUE)
+model3_tidy <- tidy(model3, conf.int = TRUE)
+
+# Filter to only include the treatment effect for each model
+model1_treatment <- model1_tidy %>% filter(term == "treatment")
+model2_treatment <- model2_tidy %>% filter(term == "treatment")
+model3_treatment <- model3_tidy %>% filter(term == "treatment")
+
+# Plot for Model 1
+plot_model1 <- ggplot(model1_treatment, aes(x = term, y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_pointrange(color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Treatment Effect on Perception\nof Immigration Policy",
+       x = "Treatment",
+       y = "Estimated Treatment Effect") +
+  theme_minimal()
+
+# Plot for Model 2
+plot_model2 <- ggplot(model2_treatment, aes(x = term, y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_pointrange(color = "green") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Treatment Effect on Perception\nof Refugee Policy",
+       x = "Treatment",
+       y = "Estimated Treatment Effect") +
+  theme_minimal()
+
+# Plot for Model 3
+plot_model3 <- ggplot(model3_treatment, aes(x = term, y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_pointrange(color = "purple") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Treatment Effect on Combined Perception\nof Immigration and Refugee Policy",
+       x = "Treatment",
+       y = "Estimated Treatment Effect") +
+  theme_minimal()
+
+# Print the plots
+print(plot_model1)
+print(plot_model2)
+print(plot_model3)
+#confirm the fact that there is no significant difference between treatment and control groups using t-tests
+
+# Confirm results with a t-test
+t.test(perception_immigrants ~ treatment, data = swedish_data)
+#t-value: -0.21221, p-value: 0.8321, indicating that there is no significant difference in the means of perception_immigrants between the two groups. 95% Confidence Interval: (-0.03591286  0.02889847), which includes zero, further confirming that there is no significant difference.
+
+t.test(perception_refugees ~ treatment, data = swedish_data)
+#t-value: 0.69736, p-value: 0.4856, also indicating that there is no significant difference in the means of perception_refugees between the two groups, however with less certainty than the last one. 95% Confidence Interval: (-0.03091368  0.06504146), which includes zero, further confirming that there is no significant difference.
+
+```
+
+
+## Robustness checks
+```{r}
+# Robustness checks
+#Multicollinearity checks
+vif(model1)
+vif(model2)
+vif(model3)
+#Overall no issues of multicollinearity between variables across all models
+
+#Alternative Model Specifications
+# Systematically testing all subsets of the 4 variables on all 3 models
+
+#Models with only 1 variable
+# Model 1: Only treatment
+model1_ <- lm(perception_immigrants ~ treatment, data = swedish_data)
+model2_ <- lm(perception_refugees ~ treatment, data = swedish_data)
+model3_ <- lm(combination_value ~ treatment, data = swedish_data)
+
+# Print summaries
+summary(model1_)
+summary(model2_)
+summary(model3_)
+
+# Model 2: Only agea
+model4 <- lm(perception_immigrants ~ agea, data = swedish_data)
+model5 <- lm(perception_refugees ~ agea, data = swedish_data)
+model6 <- lm(combination_value ~ agea, data = swedish_data)
+
+# Print summaries
+summary(model4)
+summary(model5)
+summary(model6)
+
+# Model 3: Only region
+model7 <- lm(perception_immigrants ~ region, data = swedish_data)
+model8 <- lm(perception_refugees ~ region, data = swedish_data)
+model9 <- lm(combination_value ~ region, data = swedish_data)
+
+# Print summaries
+summary(model7)
+summary(model8)
+summary(model9)
+
+# Model 4: Only time_centered
+model10 <- lm(perception_immigrants ~ time_centered, data = swedish_data)
+model11 <- lm(perception_refugees ~ time_centered, data = swedish_data)
+model12 <- lm(combination_value ~ time_centered, data = swedish_data)
+
+# Print summaries
+summary(model10)
+summary(model11)
+summary(model12)
+
+#None of these models is significant and the R-squared value is much lower than in the original models (they explain less variance). None of these models is better than the original models.
+
+#Models with only 2 varibales
+
+# Model 5: treatment + agea
+model13 <- lm(perception_immigrants ~ treatment + agea, data = swedish_data)
+model14 <- lm(perception_refugees ~ treatment + agea, data = swedish_data)
+model15 <- lm(combination_value ~ treatment + agea, data = swedish_data)
+
+# Print summaries
+summary(model13)
+summary(model14)
+summary(model15)
+
+# Model 6: treatment + region
+model16 <- lm(perception_immigrants ~ treatment + region, data = swedish_data)
+model17 <- lm(perception_refugees ~ treatment + region, data = swedish_data)
+model18 <- lm(combination_value ~ treatment + region, data = swedish_data)
+
+# Print summaries
+summary(model16)
+summary(model17)
+summary(model18)
+
+# Model 7: treatment + time_centered
+model19 <- lm(perception_immigrants ~ treatment + time_centered, data = swedish_data)
+model20 <- lm(perception_refugees ~ treatment + time_centered, data = swedish_data)
+model21 <- lm(combination_value ~ treatment + time_centered, data = swedish_data)
+
+# Print summaries
+summary(model19)
+summary(model20)
+summary(model21)
+
+# Model 8: agea + region
+model22 <- lm(perception_immigrants ~ agea + region, data = swedish_data)
+model23 <- lm(perception_refugees ~ agea + region, data = swedish_data)
+model24 <- lm(combination_value ~ agea + region, data = swedish_data)
+
+# Print summaries
+summary(model22)
+summary(model23)
+summary(model24)
+
+# Model 9: agea + time_centered
+model25 <- lm(perception_immigrants ~ agea + time_centered, data = swedish_data)
+model26 <- lm(perception_refugees ~ agea + time_centered, data = swedish_data)
+model27 <- lm(combination_value ~ agea + time_centered, data = swedish_data)
+
+# Print summaries
+summary(model25)
+summary(model26)
+summary(model27)
+
+# Model 10: region + time_centered
+model28 <- lm(perception_immigrants ~ region + time_centered, data = swedish_data)
+model29 <- lm(perception_refugees ~ region + time_centered, data = swedish_data)
+model30 <- lm(combination_value ~ region + time_centered, data = swedish_data)
+
+# Print summaries
+summary(model28)
+summary(model29)
+summary(model30)
+
+# None of the models are significant, reaffirms conclusions of the original models. All have a slightly lower R-squared value than the original models. Thus the results of the original models still stand.
+
+#Models with 3 variables
+# Model 11: treatment + agea + region
+model31 <- lm(perception_immigrants ~ treatment + agea + region, data = swedish_data)
+model32 <- lm(perception_refugees ~ treatment + agea + region, data = swedish_data)
+model33 <- lm(combination_value ~ treatment + agea + region, data = swedish_data)
+
+# Print summaries
+summary(model31)
+summary(model32)
+summary(model33)
+
+# Model 12: treatment + agea + time_centered
+model34 <- lm(perception_immigrants ~ treatment + agea + time_centered, data = swedish_data)
+model35 <- lm(perception_refugees ~ treatment + agea + time_centered, data = swedish_data)
+model36 <- lm(combination_value ~ treatment + agea + time_centered, data = swedish_data)
+
+# Print summaries
+summary(model34)
+summary(model35)
+summary(model36)
+
+# Model 13: treatment + region + time_centered
+model37 <- lm(perception_immigrants ~ treatment + region + time_centered, data = swedish_data)
+model38 <- lm(perception_refugees ~ treatment + region + time_centered, data = swedish_data)
+model39 <- lm(combination_value ~ treatment + region + time_centered, data = swedish_data)
+
+# Print summaries
+summary(model37)
+summary(model38)
+summary(model39)
+
+# Model 14: agea + region + time_centered
+model40 <- lm(perception_immigrants ~ agea + region + time_centered, data = swedish_data)
+model41 <- lm(perception_refugees ~ agea + region + time_centered, data = swedish_data)
+model42 <- lm(combination_value ~ agea + region + time_centered, data = swedish_data)
+
+# Print summaries
+summary(model40)
+summary(model41)
+summary(model42)
+
+#Reinforces original conclusions, values of R-squared are slightly lower than before. Same variables emerge as the most important and explanatory (age and region). Treatment is not significant. 
+
+#Try an interaction between region and age
+model1_int <- lm(perception_immigrants ~ treatment + agea * region, data = swedish_data)
+model2_int <- lm(perception_refugees ~ treatment + agea * region, data = swedish_data)
+model3_int <- lm(combination_value ~ treatment + agea * region, data = swedish_data)
+
+summary(model1_int)
+summary(model2_int)
+summary(model3_int)
+#The results confirm that the treatment effect is consistently non-significant across all alternative models. However the interaction variable of age and region proved to be significnat across most of the models. Showing that age affects perception differently in different regions, and vice versa. 
+
+#Propoensity score matching
+matchit <- matchit(treatment ~ agea + region, data = swedish_data, method = "nearest")
+matched_data <- match.data(matchit)
+
+model1_psm <- lm(perception_immigrants ~ treatment + agea + region, data = matched_data)
+model2_psm <- lm(perception_refugees ~ treatment + agea + region, data = matched_data)
+model3_psm <- lm(combination_value ~ treatment + agea + region, data = matched_data)
+
+summary(model1_psm)
+summary(model2_psm)
+summary(model3_psm)
+#The treatment effect remains non-significant, and the slight improvements in model fit suggest that while PSM helps control for confounding, the original results were not biased by these factors. Therefore, the conclusions drawn from the original analysis remain valid.
+
+#Rerunning the test
+t.test(perception_immigrants ~ treatment, data = matched_data)
+t.test(perception_refugees ~ treatment, data = matched_data)
+#Models confirm that the treatment does not have a significant impact on public perceptions of immigrants and refugees.
+
+```
+
+## Falsification tests: placebo tests using pre-event data
+This chunks output is in the thesis PDF.
+```{r}
+#Perception of immigration
+placebo_data <- swedish_data %>% filter(time_centered < 0)
+placebo_data <- placebo_data %>%
+  mutate(placebo_treatment = ifelse(time_centered >= -20, TRUE, FALSE))
+
+placebo_model1 <- lm(perception_immigrants ~ placebo_treatment + agea + region + time_centered, data = placebo_data)
+summary(placebo_model1)
+#This non-significant result is expected and desirable in a placebo test, as it suggests that the treatment effect observed (or not observed) in the original analysis is not simply a reflection of underlying trends or pre-existing conditions. The non-significance here indicates that the treatment in the original models does not coincide with any pre-existing changes in perception, supporting the robustness of the original findings.
+
+#Visuzalize results
+# Tidy the placebo model to extract coefficients and confidence intervals
+placebo_model1_tidy <- tidy(placebo_model1, conf.int = TRUE)
+
+# Filter to only include the placebo treatment effect
+placebo_model1_treatment <- placebo_model1_tidy %>% filter(term == "placebo_treatmentTRUE")
+# Plot the placebo treatment effect with confidence intervals
+placebo_plot <- ggplot(placebo_model1_treatment, aes(x = term, y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_pointrange(color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +  # Null effect line
+  labs(title = "Placebo Treatment Effect on Perception\nof Immigration Policy",
+       x = "Placebo Treatment",
+       y = "Estimated Treatment Effect") +
+  theme_minimal()
+
+# Print the plot
+print(placebo_plot)
+
+# Perception of refugees
+placebo_model2 <- lm(perception_refugees ~ placebo_treatment + agea + region + time_centered, data = placebo_data)
+summary(placebo_model2)
+
+# Tidy the placebo model to extract coefficients and confidence intervals
+placebo_model2_tidy <- tidy(placebo_model2, conf.int = TRUE)
+
+# Filter to only include the placebo treatment effect
+placebo_model2_treatment <- placebo_model2_tidy %>% filter(term == "placebo_treatmentTRUE")
+
+# Plot the placebo treatment effect with confidence intervals
+placebo_plot2 <- ggplot(placebo_model2_treatment, aes(x = term, y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_pointrange(color = "green") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +  # Null effect line
+  labs(title = "Placebo Treatment Effect on Perception\nof Refugee Policy",
+       x = "Placebo Treatment",
+       y = "Estimated Treatment Effect") +
+  theme_minimal()
+
+# Print the plot
+print(placebo_plot2)
+
+# Combined perception of immigrants and refugees
+placebo_model3 <- lm(combination_value ~ placebo_treatment + agea + region + time_centered, data = placebo_data)
+summary(placebo_model3)
+
+# Tidy the placebo model to extract coefficients and confidence intervals
+placebo_model3_tidy <- tidy(placebo_model3, conf.int = TRUE)
+
+# Filter to only include the placebo treatment effect
+placebo_model3_treatment <- placebo_model3_tidy %>% filter(term == "placebo_treatmentTRUE")
+
+# Plot the placebo treatment effect with confidence intervals
+placebo_plot3 <- ggplot(placebo_model3_treatment, aes(x = term, y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_pointrange(color = "purple") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +  # Null effect line
+  labs(title = "Placebo Treatment Effect on Combined Perception\nof Immigration and Refugee Policy",
+       x = "Placebo Treatment",
+       y = "Estimated Treatment Effect") +
+  theme_minimal()
+
+# Print the plot
+print(placebo_plot3)
+```
+
